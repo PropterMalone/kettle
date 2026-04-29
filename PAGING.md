@@ -2,8 +2,9 @@
 
 A design for programmatic out-of-band notification ("paging") between AT Protocol identities, without phone-number exchange.
 
-**Status**: Sketch v0.1, April 2026.
+**Status**: Sketch v0.2, April 2026.
 **Audience**: feedback from atproto-protocol people before lexicon and implementation are locked.
+**Changes since v0.1**: (1) §6 Capabilities added — the value-prop surface (group fanout, threading, page-back without phone exchange, dead-man's switch, anonymous tip line, federation, etc.) is now explicit rather than implicit-in-the-lexicon. (2) **Allow-list moved bridge-side, not on PDS.** Trust graph (who-allows-who-to-page-them) was a subpoenable public record in v0.1; now it's bridge-private state managed by the recipient via authenticated API. PDS only carries a pointer to the recipient's bridge. (3) §7 Encryption clarified. (4) Open questions §9 expanded.
 
 **Project name.** The name carries two meanings at once and is the better for holding both. "Kettling" is the police tactic of containing protesters in a defined area — the inversion is *a tool that kettles communication into trusted channels*, used by the people otherwise being kettled. And a kettle is also for tea: the small, private, warm conversations among people who already trust each other — the cozy side of why organizers organize in the first place. The protocol serves both: a rapid-response paging primitive sharp enough to coordinate against a hostile state, and a quiet inbox for "are you free Saturday?" between comrades. Organizing infrastructure that's only sharp-edged misses the half of community that isn't a fight. If the name doesn't survive review by the people the tool is for, rename is cheap — the lexicon namespace is the actual identity.
 
@@ -23,7 +24,9 @@ The forcing function is organizing in adversarial environments — KC DSA runnin
 
 ## 2. Design principles
 
-**PDS-anchored consent.** The allow-list is a record on the recipient's PDS. Senders post page records to their own PDS. The protocol moves through standard atproto firehose + custom lexicons. Nothing requires a centralized operator.
+**PDS-anchored discovery, bridge-private trust.** The recipient's PDS carries a *pointer* to their bridge (`community.paging.bridgeEndpoint`); the actual allow-list (who can page them, with what rate/category/hours rules) lives bridge-side, never published to the public firehose. Senders post page records to their own PDS; the recipient's bridge subscribes to the firehose, resolves its own private allow-list, and decides whether to dispatch. The trust graph is therefore private to the bridge operator, not subpoenable from public records.
+
+**Sender writes are public.** A sender posting `community.paging.send` to their own PDS is publicly observable on the firehose — the *act* of paging is not secret, even though the *content* (encrypted) and the *recipient's allow-list state* (bridge-private) are. Sealed-sender envelope (§7 option b) is the path to also hiding sender-recipient relationships; v1 ships without it.
 
 **Pluggable dispatch.** The protocol doesn't know about phone numbers, SMS, Signal, push, or any specific transport. That's bridge-internal. Bridges are feed-generator-shaped: anyone-can-run watchers that subscribe to filtered Jetstream, validate sender against the recipient's allow-list, dispatch via configured transport.
 
@@ -43,23 +46,26 @@ community.paging.send              Jetstream
 {target_did, ciphertext,           ────────────────────►           
  nonce, category}                  sees record                     
                                                                    
-                                   Fetches recipient's             
-                                   community.paging.allowList      
-                                   from recipient's PDS            
+                                   Consults BRIDGE-PRIVATE         
+                                   allow-list (sender_did,         
+                                   rate, hours, category)          
                                                                    
-                                   If sender_did is on allow-list  
-                                   AND rate/hours/category match:  
-                                                                   
-                                   Decrypts body using             
+                                   If allowed:                     
+                                   decrypts body using             
                                    recipient's key                 
                                                                    
                                    Dispatches via configured       
                                    transport ─────────────────────► SMS / Signal / push / ntfy
+                                                                   
+                                   Writes                          ◄── recipient manages allow-list
+                                   community.paging.received           via authenticated API to bridge
+                                   record back to recipient's      
+                                   PDS for audit trail             
 ```
 
-Sender writes to their own repo. Bridge subscribes to a filtered Jetstream stream (e.g., `wantedCollections=community.paging.send` + filter on `target_did`). Allow-list is publicly readable on recipient's PDS. Bridge enforces consent and dispatches.
+Sender writes to their own repo. Bridge subscribes to a filtered Jetstream stream (e.g., `wantedCollections=community.paging.send` filtered on `target_did`). The allow-list is bridge-side state — recipient configures it by authenticated API call to *their own* bridge, never via PDS write.
 
-The bridge is the only stateful service-side component, and it's owned by the recipient (or a trusted operator chosen by the recipient).
+The bridge is the only stateful service-side component, and it's owned by the recipient (Tier 2/3) or a trusted operator chosen by them (Tier 0/1). Bridge-private trust state is the only state worth subpoenaing — that subpoena targets the bridge, not the public PDS infrastructure.
 
 ## 4. Lexicons
 
@@ -92,30 +98,45 @@ Plaintext (decrypted body) is a `community.paging.body` schema:
 
 Length cap on plaintext text: 160 bytes (compatible with SMS without segmentation when transport is SMS).
 
-### `community.paging.allowList`
-Recipient publishes on their PDS. Public record (allow-list membership is not secret — only the *number* is, and that lives at the bridge).
+### `community.paging.bridgeEndpoint`
+Recipient publishes on their PDS. Public record. **Pointer only — the allow-list itself is not on PDS.**
 
 ```json
 {
-  "$type": "community.paging.allowList",
-  "bridge_endpoint": "https://bridge.kcdsa.org" | null,
+  "$type": "community.paging.bridgeEndpoint",
+  "bridge_endpoint": "https://bridge.kcdsa.org",
   "bridge_did": "did:plc:..." | null,
   "default_pubkey": "<bytes>",
-  "entries": [
-    {
-      "sender_did": "did:plc:abc...",
-      "rate_limit_per_day": 3,
-      "allowed_hours_utc": [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1, 2],
-      "categories": ["emergency", "event"],
-      "expires_at": "2026-05-01T23:59:59Z"
-    }
-  ],
-  "global_rate_limit_per_day": 20,
   "createdAt": "2026-04-29T20:00:00Z"
 }
 ```
 
-Key: `self`. Bridge resolves at page-receipt time; updates are picked up on the next page received from any sender.
+Key: `self`. Tells senders' tooling (and the wider network) which bridge handles this recipient. The `default_pubkey` is the recipient's public key for encrypting page bodies.
+
+**Why not on PDS:** the trust graph (who is permitted to reach me) is sensitive metadata — knowing "Kevin allows these 23 DIDs to page him" reveals organizing affiliations, social structure, rapid-response tree topology. v0.1 of this spec put the allow-list on PDS as a public record; v0.2 fixed that. Public PDS records are subpoenable, scrapeable, and indexable. Bridge-side state is not (or at least, not without targeting the bridge specifically).
+
+### Allow-list (bridge-side, not a lexicon)
+
+The allow-list is bridge-private state. Schema is bridge-internal, but the recipient-facing semantics:
+
+```yaml
+allow_list:
+  global_rate_limit_per_day: 20
+  default_quiet_hours_utc: [3, 4, 5, 6, 7]   # UTC hours during which only emergency category fires
+  entries:
+    - sender_did: did:plc:abc...
+      rate_limit_per_day: 3
+      allowed_hours_utc: [13, 14, ..., 2]
+      categories: [emergency, event]
+      expires_at: 2026-05-01T23:59:59Z
+      transport_override: signal           # optional per-sender transport
+    - sender_did: did:plc:def...
+      rate_limit_per_day: unlimited
+      categories: [emergency, event, personal]
+      expires_at: null
+```
+
+The recipient manages the allow-list via authenticated API calls to their own bridge (HTTPS + atproto-signed challenge, or DPoP). Bridges should support export/import of allow-list state for portability when switching bridges.
 
 ### `community.paging.bridgeAuthorization`
 Recipient signs a delegation: "this bridge endpoint may act as my page-receiver." Bridge presents this when challenged. Standard atproto signing.
@@ -145,9 +166,51 @@ The same bridge software supports four deployment shapes:
 
 Tier 3 is the elegant escape: a mobile app subscribes to filtered Jetstream for the user's DID, lights up a push notification when a valid page arrives. **No phone number ever in the protocol layer or the bridge.**
 
-Multi-bridge federation falls out: KC DSA's bridge handles its members; Sonoma DSA's bridge handles its members; no single bridge has the whole graph. The allow-list record's `bridge_endpoint` field tells senders' tooling which bridge is authoritative for which recipient.
+Multi-bridge federation falls out: KC DSA's bridge handles its members; Sonoma DSA's bridge handles its members; no single bridge has the whole graph. The recipient's `community.paging.bridgeEndpoint` record on PDS tells senders' tooling which bridge is authoritative for which recipient.
 
-## 6. Encryption: open tradeoff
+## 6. Capabilities — what Kettle delivers
+
+Items in the **transport menu** dispatch via integration with the named third-party service (most via documented public APIs, none requiring partnership). Items in **pure-protocol features** require no third-party cooperation — bridge logic and atproto records do the work.
+
+### Transport menu
+
+The bridge dispatches via configured transport. Recipient's allow-list specifies which transport for which sender or category.
+
+- **SMS** — Twilio, Vonage, Plivo, Telnyx, Bandwidth, AWS SNS, or any RFC-compliant SMS provider. ~$0.008/msg + carrier fees. US compliance: A2P 10DLC registration (~$20 + 3-week wallclock).
+- **Push notifications** — APNs / FCM via a Kettle-distributed mobile app, or ntfy.sh (open protocol, self-hostable). Free. No phone numbers in system.
+- **Signal** — via signal-cli / signald (community-maintained; Signal-org cooperation is a probable bonus, not a requirement). Recipient must have Signal installed.
+- **Matrix** — via standard client-server API. E2E encryption via Olm.
+- **Discord / Slack / Telegram** — via documented incoming webhooks or bot APIs. No platform partnership needed.
+- **Email / email-to-SMS gateway** — SMTP. Free, ubiquitous; carrier gateways are dying.
+- **Voice call** — SIP via Asterisk + Telnyx/VoIP.ms trunks. Different reach profile (people ignore unknown numbers).
+- **Webhook to user-chosen endpoint** — bridge POSTs to any URL the recipient provides. Recipient wires to IFTTT, Home Assistant, custom bot, etc.
+- **XMPP / IRC** — old but open; some organizing communities still on them.
+
+The protocol is transport-pluggable. Adding a transport adds ~50 lines to a bridge implementation; lexicons don't change.
+
+### Pure-protocol features
+
+These are protocol-native — atproto records and bridge logic do the work. They all dispatch via the transport menu when the time comes, but the *coordination semantics* are Kettle's.
+
+- **Page-to-group fanout.** A `community.paging.group` record defines membership; one sender pages the group; all members' bridges fire. The rapid-response primitive: "ICE 5min out at 14th & Wabash" → 50 members notified within seconds.
+- **Threaded async conversation.** `replyTo` field enables multi-party async messaging with consent at every edge — replies pass through the original sender's allow-list before delivery. **This is decentralized group DMs without centralized chat infrastructure** — the use case Bluesky's roadmap covers, but federated rather than centralized at `chat.bsky.social`.
+- **Page-back without phone exchange.** Recipient gets SMS via Twilio short code; replies SMS; bridge translates the SMS reply into a `community.paging.send` record on recipient's PDS, encrypted to original sender's pubkey. Bidirectional flow, neither end ever learns the other's number.
+- **Read/delivery receipts.** Bridge writes `community.paging.received` records back to recipient's PDS. Sender's tooling subscribes — knows "delivered to bridge at 23:42" without knowing if recipient read it.
+- **Auto-acknowledgments.** Recipient configures bridge with auto-replies ("in a meeting, will respond after 8pm"). Bridge writes ack records to sender's PDS; sender's tooling surfaces them.
+- **Time-locked pages.** `deliver_after` field on page record. Bridge holds, dispatches at scheduled time. Useful for organizing prep ("remind coordinator at 8am about 9am action") and staged escalation.
+- **Dead-man's switch.** `community.paging.deadmansSwitch` record: "if I haven't checked in by time T, fire this page to these contacts." Bridge polls; if no check-in, fires. Critical for organizers in physically-risky situations (protest arrests, ICE encounters, traveling through hostile territory). Replaces centralized-SaaS dead-man tools with on-PDS, federated, self-hostable equivalent. (Threat-model open question in §9: who runs the polling bridge if the recipient's own bridge goes offline alongside them.)
+- **Anonymous tip line.** Wildcard allow-list ("anyone can page; content held in a moderation queue"). Recipient reviews queue, decides which to dispatch. Use cases: union tip line, mutual aid intake, journalist source contact. Cryptographic sender authentication via atproto signing — but the sender's DID can itself be a fresh, unprofiled identity, preserving practical anonymity.
+- **Geofenced paging.** Allow-list entries can specify "only deliver if I'm in geo X." Recipient publishes location records (or keeps last-location at bridge). Filters before dispatch.
+- **Per-context routing.** Different bridges for different categories. Work category → Slack webhook; organizing → Signal-via-self-bridge; family → APNs via Kettle app. Routing rules live in the bridge-side allow-list; recipient configures via authenticated API to each of their bridges, or routes everything through one meta-bridge that re-dispatches based on category.
+- **Quorum paging / confirmation chains.** Group page; dispatch fires only when N members ack within M minutes ("≥10 confirmed coming, GO"). Bridge logic, no third party.
+- **Cross-bridge federation.** KC DSA's bridge ↔ Sonoma DSA's bridge ↔ propter-page-bridge. Members on bridge A can page members on bridge B. Bridges subscribe to firehose records targeting their users regardless of which bridge published them.
+- **Bridge-as-a-service for orgs.** A union, mutual-aid org, or DSA chapter runs a single bridge for all members. Members keep PDSes elsewhere. Org gets observability over its rapid-response channel; members get a free federated paging service. No SaaS dependency.
+- **Public alert channels.** Any DID can run a write-only-broadcast Kettle account. Subscribers add it to *their own* allow-lists with rate caps. Enables city-wide rapid-response broadcasts (chapter emergency channels, weather/disaster alerts, ICE-spotted reports) without any centralized broadcast service.
+- **Atproto-native moderation.** Bridge applies labels: spam-list label → drop; positive-reputation label from a chapter labeler → trust; quiet-hours violation → hold for review. Pure atproto, composable with existing labelers.
+
+The transport menu is what gets paging out to phones; the pure-protocol features are what makes Kettle a paging *system* rather than a notification dispatcher with a wrapper.
+
+## 7. Encryption: open tradeoff
 
 Three options for content/graph privacy:
 
@@ -159,7 +222,7 @@ Three options for content/graph privacy:
 
 Recommendation: ship (a) for v1; (b) is the principled long-term answer; (c) is the "we want this in production tomorrow" path if Bluesky team will play.
 
-## 7. Composition
+## 8. Composition
 
 **With Smoke Signal events.** RSVP record on Smoke Signal could grant time-bounded auto-entry to the event-organizer's allow-list. RSVP yes to May Day → organizer's DID gets `expires_at = event.end + 1h` paging rights. Event-time reachability without manual allow-list edits. Coordination needed: Smoke Signal lexicon ownership lives in `community.lexicon`; paging should probably live there too.
 
@@ -169,7 +232,7 @@ Recommendation: ship (a) for v1; (b) is the principled long-term answer; (c) is 
 
 **As a federated group-DM substrate.** Add `replyTo` and the system becomes async multi-party threading with allow-list-mediated membership. Each user has one inbox (their allow-list defines who can post to it). Threads form when senders reply to pages and the original sender's allow-list permits them. This is decentralized group DMs — the use case Bluesky's roadmap covers, but federated rather than centralized.
 
-## 8. Open questions for atproto-community
+## 9. Open questions for atproto-community
 
 1. **Namespace placement.** `community.lexicon.paging.*` vs `chat.kettle.paging.*` vs a new top-level. Smoke Signal team is migrating events into `community.lexicon.*`; coordination is the load-bearing call. *(Lexicon-community input requested before locking schema.)*
 
@@ -179,11 +242,17 @@ Recommendation: ship (a) for v1; (b) is the principled long-term answer; (c) is 
 
 4. **Jetstream production-readiness.** Jetstream is documented as "not a stable protocol API." For self-hosted bridges this is acceptable; for hosted public bridges (Tier 0) and app-based clients (Tier 3) it's a production risk. Is there a stable firehose subscription path planned?
 
-5. **Cross-bridge federation.** A user's allow-list on PDS-A may name a bridge run by a different operator than PDS-A's host. Does the protocol need explicit cross-bridge addressing semantics, or is "the recipient's allow-list points at one bridge, that bridge handles all of their pages" sufficient?
+5. **Cross-bridge federation.** A user's `bridgeEndpoint` on PDS-A may name a bridge run by a different operator than PDS-A's host. Does the protocol need explicit cross-bridge addressing semantics, or is "the recipient's PDS points at one bridge, that bridge handles all of their pages" sufficient?
 
-6. **Rate limiting and abuse.** Per-sender rate limits and global daily caps are encoded in the allow-list record, enforced bridge-side. Adversarial sender posts a million page records; bridge filters, but the records are still on the firehose. Is there a firehose-level abuse mitigation we should care about, or is "ignore at the bridge" sufficient?
+6. **Rate limiting and abuse.** Per-sender rate limits and global daily caps are bridge-side state, enforced bridge-side. Adversarial sender posts a million page records; bridge filters, but the records are still on the firehose. Is there a firehose-level abuse mitigation we should care about, or is "ignore at the bridge" sufficient?
 
-## 9. v1 scope
+7. **Bridge-side state portability.** The allow-list lives at the bridge, not on PDS — that's the trust-graph-privacy fix in v0.2. Cost: switching bridges requires migrating the list. Is the right answer (a) a standard `community.paging.exportAllowList` XRPC the recipient invokes against their old bridge before pointing PDS at a new one, (b) a manual JSON dump via the bridge's admin UI, or (c) a more principled approach like signed allow-list snapshots that any bridge can ingest? Recipients without technical fluency need this to not be a brick wall.
+
+8. **Dead-man's-switch threat model.** Who runs the polling that fires the dead-man's-switch page when recipient stops checking in? If it's the recipient's own bridge, it can't fire after the bridge itself goes offline (recipient's machine seized, network cut, recipient kidnapped *with* their phone that's running the Tier 3 bridge). External-poller designs introduce a third-party trust dependency. Probably the right answer is "designated escalation bridge" — recipient pre-authorizes a chapter or trusted-friend bridge to run the poller, with an attestation flow that can't be silenced by capturing only the recipient's primary device. Wants atproto-community input on the attestation pattern.
+
+9. **Anonymous tip line + atproto signing.** Atproto signing implies the sender's DID is in the record. "Anonymous" in this design means "DID is fresh and unprofiled" rather than "no DID." Is that practical-anonymity guarantee strong enough for high-stakes use cases (whistleblowing, abuse reporting)? Or should the lexicon support a sealed-sender mode that strips the sender DID at the cost of losing source authentication?
+
+## 10. v1 scope
 
 **Build:**
 - Three lexicons + JSON schemas (above)
@@ -200,7 +269,7 @@ Recommendation: ship (a) for v1; (b) is the principled long-term answer; (c) is 
 
 **Estimated engineering**: ~3 weeks (1 week lexicons, 1 weekend reference bridge, 1 weekend Tier 3 client, 1 weekend hosted bridge deployment, plus integration work). A2P 10DLC compliance for Tier 0 with Twilio is a parallel multi-week wallclock; Tier 3 sidesteps it entirely.
 
-## 10. Comparisons
+## 11. Comparisons
 
 **vs. Signal.** Signal does end-to-end encrypted 1:1 and group messaging; people on Signal are reachable. Kettle-paging is *not a chat replacement* — it's a paging primitive that can dispatch *to* Signal as one of many transports. They compose: Signal handles the conversation, Kettle decides who's allowed to start one and routes the alert.
 
