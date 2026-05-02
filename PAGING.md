@@ -318,7 +318,7 @@ Bucket-sharding survives only as a fallback if dual-DID's out-of-band consent ce
 
 ## 8. Composition
 
-**With Smoke Signal events.** An RSVP record on Smoke Signal grants time-bounded auto-entry to the event-organizer's allow-list. RSVP yes to May Day → the organizer's DID gets `expiresAt = event.end + 1h` paging rights. Lexicon coordination is needed: Smoke Signal lives in `community.lexicon.*`; paging proposes the same namespace (§9 Q1).
+**With Smoke Signal events.** An RSVP record on Smoke Signal grants time-bounded auto-entry to the event-organizer's allow-list. RSVP yes to May Day → the organizer's DID gets `expiresAt = event.end + 1h` paging rights. Lexicon coordination is needed: Smoke Signal lives in `community.lexicon.*`; Kettle currently sits in `community.paging.*`, and migration into `community.lexicon.*` on adoption is the open question (§9 Q1).
 
 **With Snug** (sibling project: encrypted MLS group chat for atproto, same author). A Snug group can be the *target* of a Kettle page (`community.paging.group`, v1.1). Snug protects in-group conversation; Kettle extends reach when the recipient is outside the chat. Lexicon-level consistency between the two is pre-v1 work.
 
@@ -336,7 +336,7 @@ Subpoena topology: subpoena on the sender yields a relay list, not a member list
 
 ## 9. Open questions for atproto-protocol contributors
 
-1. **Namespace placement.** Recommend `community.lexicon.paging.*`, alongside Smoke Signal. Push back if there's a reason to separate.
+1. **Namespace placement.** Current namespace is `community.paging.*` (provisional, pending Frazee/Why conversation). Open question: migrate into `community.lexicon.paging.*` on adoption, alongside Smoke Signal? Push back if there's a reason to keep them separate.
 
 2. **Bridge auth pattern.** Is `community.paging.bridgeAuthorization` the right shape, or should bridges authenticate via standard atproto OAuth scopes against the recipient's PDS? Custom delegation is more federation-pure; OAuth is more pattern-matched.
 
@@ -369,7 +369,7 @@ Subpoena topology: subpoena on the sender yields a relay list, not a member list
 ## 10. v1 scope
 
 **Build:**
-- Five lexicons (`send`, `bridgeEndpoint`, `bridgeAuthorization`, `received`, `body` wire-format).
+- Four lexicons (`send`, `bridgeEndpoint`, `bridgeAuthorization`, `received`). The `community.paging.body` shape (§4) is the decrypted-plaintext wire format — JSON-shape documentation, not its own atproto record lexicon.
 - Reference bridge — Docker image, Twilio + ntfy.sh dispatchers, deployable as Tier 0/1/2.
 - Tier 3 reference client — Expo/React Native, push-only, ntfy.sh option.
 - Hosted public bridge — single deployment of the reference.

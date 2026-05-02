@@ -230,7 +230,7 @@ Hiding the publisher's identity is non-trivial — at minimum, subscribers need 
 
 ## 9. Open questions
 
-1. **Namespace placement.** Recommend `community.lexicon.alert.*`, alongside Kettle's `community.lexicon.paging.*` and Smoke Signal. Push back if there's a reason to separate.
+1. **Namespace placement.** Current namespace is `community.alert.*` (provisional, pending Frazee/Why conversation). Open question: migrate into `community.lexicon.alert.*` on adoption, alongside Kettle's `community.paging.*` and Smoke Signal? Push back if there's a reason to keep them separate.
 
 2. **Channel discovery.** How do new subscribers find channels? Bluesky search, dedicated atproto labelers, out-of-band only, channel directory feed? Probably a mix; ergonomic default for non-technical subscribers is the priority.
 
